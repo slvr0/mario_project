@@ -4,6 +4,8 @@ import torch.functional as F
 from torch.distributions import Categorical
 import torch
 import os
+from conf import Config
+from logger import Logger
 
 #this class stores rewards and retrieves the instant average of reward
 class BaselineBuffer:
@@ -11,21 +13,31 @@ class BaselineBuffer:
     self.size = size
     self.storage = deque(maxlen=self.size)
     self.N = 0
+    self.sum = 0
 
   #very unprobable that this actually works
   def average(self):
+    if self.N > 0 :
+      return self.sum / self.N
+    else:
+      return 0.0
+
     return np.mean(self.storage)
 
   def append(self, v):
     self.storage.append(v)
+    self.sum += v
     self.N = self.N + 1 if self.N < self.size else self.N
 
 class Agent :
-  def __init__(self,ppo_net, input_dims, output_dims):
+  def __init__(self,ppo_net, input_dims, output_dims, config = Config()):
     self.ppo_net = ppo_net
     self.input_dims = input_dims
     self.output_dims = output_dims
 
+    self.config = config
+
+    self.logger = Logger(config=config)
     #hyperparams, move to config and argparser soon
     self.gamma = 0.9
     self.tau = 1.0
@@ -49,8 +61,10 @@ class Agent :
     self.terminals = []
     self.values = []
     self.old_actions = []
+    self.batch_scales = []
 
   def predict(self, observation):
+
     obs_tensor = torch.from_numpy(observation)
 
     logits, value = self.ppo_net(obs_tensor)
@@ -64,10 +78,11 @@ class Agent :
     return action
 
   def store(self, observation, action, reward, done):
-    self.observations.append(torch.from_numpy(observation))
+    self.observations.append(observation)
     self.actions.append(action)
     self.rewards.append(torch.as_tensor(reward))
     self.terminals.append(torch.as_tensor(done))
+    self.batch_scales.append(reward - self.baseline_buffer.average())
 
   def clear_memory(self):
     self.observations = []
@@ -76,6 +91,7 @@ class Agent :
     self.terminals = []
     self.old_actions = []
     self.values = []
+    self.batch_scales = []
 
   def save_model(self, path):
     torch.save(self.ppo_net.state_dict(), path)
@@ -86,54 +102,60 @@ class Agent :
       print("loading model...")
       self.ppo_net.load_state_dict(torch.load(path))
 
-  def learn(self, last_state, logger):
-    _, next_value, = self.ppo_net(torch.from_numpy(last_state))
-    next_value = next_value.squeeze()
+  def learn(self, last_state, step_idx):
+    actions = torch.LongTensor(self.actions).to(self.ppo_net.device)
+    states = torch.FloatTensor(self.observations).to(self.ppo_net.device)
+    scales = torch.FloatTensor(self.batch_scales).to(self.ppo_net.device)
 
-    old_log_policies = torch.cat(self.old_actions).detach()
-    actions = torch.cat(self.actions)
-    values = torch.cat(self.values).detach()
-    states = torch.cat(self.observations)
-    self.local_steps = len(states)
-    gae = 0
-    R = []
-    for value, reward, done in list(zip(self.values, self.rewards, self.terminals))[::-1]:
-      gae = gae * self.gamma * self.tau
-      gae = gae + reward + self.gamma * next_value.detach() * (1 - done.item()) - value.detach()
-      next_value = value
-      R.append(gae + value)
-    R = R[::-1]
-    R = torch.cat(R).detach()
-    advantages = R - values
-    for i in range(self.learning_epochs):
-      indice = torch.randperm(self.local_steps)
-      for j in range(self.batch_size):
+    self.optimizer.zero_grad()
 
-        batch_idx_start = int(j * (self.local_steps / self.batch_size))
-        batch_idx_end = int((j + 1) * (
-                            self.local_steps / self.batch_size))
-        batch_indices = indice[batch_idx_start : batch_idx_end]
+    logits,_ = self.ppo_net(states[:,0,:,:,:])
+    logits_prob_log_softmaxed = torch.nn.functional.log_softmax(logits, dim=1)
 
-        logits, value = self.ppo_net(states[batch_indices])
-        new_policy = torch.nn.functional.softmax(logits, dim=1)
-        new_m = Categorical(new_policy)
-        new_log_policy = new_m.log_prob(actions[batch_indices])
-        ratio = torch.exp(new_log_policy - old_log_policies[batch_indices])
-        actor_loss = -torch.mean(torch.min(ratio * advantages[batch_indices],
-                                           torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon) *
-                                           advantages[
-                                             batch_indices]))
+    batch_size = self.config.batch_size
 
-        critic_loss = torch.nn.functional.smooth_l1_loss(torch.as_tensor(R[batch_indices]).squeeze(), value.squeeze())
+    logits_prob_action_scaled = scales * logits_prob_log_softmaxed[:, actions]
 
-        logger.writer.add_scalar("critic_loss", critic_loss, i)
+    loss = -logits_prob_action_scaled.mean()
 
-        entropy_loss = torch.mean(new_m.entropy())
-        total_loss = actor_loss + critic_loss - self.beta * entropy_loss
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.ppo_net.parameters(), 0.5)
-        self.optimizer.step()
+    #now include entropy...
+    logits_prob_softmaxed = torch.nn.functional.softmax(logits, dim=1)
+
+    #entropy H(p) = - average sum of log p * p
+    entropy = -(logits_prob_softmaxed * logits_prob_log_softmaxed).sum(dim=1).mean()
+    entropy_loss = -self.config.entropy_beta * entropy
+
+    final_loss = loss + entropy_loss
+
+    final_loss.backward()
+    torch.nn.utils.clip_grad_norm_(self.ppo_net.parameters(), 0.5)
+
+    self.optimizer.step()
+
+    #output on tensorboard X (i.e.s do new calculations with weights updated and see the change
+    newlogits, _ = self.ppo_net(states[:,0,:,:,:])
+    gradient_max, gradient_means, gradient_counts = 0.0, 0.0, 0
+
+    for param in self.ppo_net.parameters():
+
+      gradient_max = max(gradient_max, param.data.abs().max().item())
+      gradient_means += (param.data **2).mean().sqrt().item()
+      gradient_counts += 1
+
+    self.logger.writer.add_scalar("baseline reward", self.baseline_buffer.average(), step_idx)
+    self.logger.writer.add_scalar("entropy(uncertainty in probability distribution)", entropy.item(), step_idx)
+    self.logger.writer.add_scalar("scales (expected reward vs each action reward in training session)", scales.mean(), step_idx)
+    self.logger.writer.add_scalar("loss entropy", entropy_loss.item(), step_idx)
+
+    self.logger.writer.add_scalar("loss policy", loss.item(), step_idx)
+    self.logger.writer.add_scalar("total loss", final_loss.item(), step_idx)
+    self.logger.writer.add_scalar("gradient change average ", gradient_means / gradient_counts, step_idx)
+    self.logger.writer.add_scalar("max gradient change", gradient_max, step_idx)
+
+    self.clear_memory()
+
+
+
 
 
 

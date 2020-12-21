@@ -13,7 +13,8 @@ class PPONetwork(nn.Module):
 
     self.create_network()
 
-
+    self.device = torch.device('cpu')
+    self.to(self.device)
 
   def create_network(self):
     if self.network_configuration == 1 :
@@ -24,6 +25,8 @@ class PPONetwork(nn.Module):
       self.linear = nn.Linear(32 * 6 * 6, 512)
       self.critic_linear = nn.Linear(512, 1)
       self.actor_linear = nn.Linear(512, self.output_dims)
+
+
 
   def init_weights(self):
       for module in self.modules():

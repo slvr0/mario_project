@@ -85,9 +85,11 @@ class Environment :
     self.output_dims = self.env.action_space.n
 
     self.ppo_net = PPONetwork(self.input_dims, self.output_dims, self.config.network_preset)
-    self.agent = Agent(self.ppo_net, self.input_dims, self.output_dims)
+    self.agent = Agent(self.ppo_net, self.input_dims, self.output_dims, self.config)
     self.agent.load_model('models/' + self.agent_name)
     self.ppo_net.eval()
+
+    self.step_idx = 0
 
   def create_environment(self):
     return gym_super_mario_bros.make(self.env_name)
@@ -100,18 +102,20 @@ class Environment :
     total_reward = 0
 
     while not done:
+      self.step_idx += 1
+
       action = self.agent.predict(state)
       new_state, reward, done, info = self.env.step(action)
 
       total_reward += reward
 
-      #self.agent.baseline_buffer.append(reward)
+      self.agent.baseline_buffer.append(reward)
 
       self.agent.store(state, action, reward, done)
 
       #self.env.render()
 
-    self.agent.learn(state, self.logger)
+    self.agent.learn(state, self.step_idx)
     return total_reward
 
 
