@@ -96,8 +96,8 @@ class Agent :
 
     state = T.tensor([state], dtype=T.float32).to(self.actor.device)
 
-    probs = self.actor(state)
-    value = self.critic(state)
+    probs = self.actor(state[0])
+    value = self.critic(state[0])
 
     action = probs.sample()
 
@@ -122,6 +122,9 @@ class Agent :
         for k in range(t, len(rewards) - 1):
           adv_t += adv_decay * (rewards[k] + self.gamma * values[k + 1]
                                 * (1 - int(terminals[k])) - values[k])
+
+
+
           adv_decay *= self.gamma * self.gamma_gae
         advantage[t] = adv_t
 
@@ -136,10 +139,11 @@ class Agent :
 
         #calculate new poliy values, this is being looped so at this state policy will change,
 
-        new_probs_t   = self.actor(state_t)
+        new_probs_t   = self.actor(state_t[:,0,:,:,:])
+
         new_probs_t = new_probs_t.log_prob(actions_t)
 
-        new_critics_v_t = self.critic(state_t)
+        new_critics_v_t = self.critic(state_t[:,0,:,:,:])
 
         probability_ratio = new_probs_t.exp() / prev_probs_t.exp()
 

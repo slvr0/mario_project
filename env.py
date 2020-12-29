@@ -22,8 +22,8 @@ class CustomRewardWrapper(Wrapper):
     self.current_score = 0
 
   def step(self, action):
-    action = action.detach().cpu().numpy()
-    state, reward, done, info = self.env.step(*action)
+    #action = action.detach().cpu().numpy()
+    state, reward, done, info = self.env.step(action)
 
     state = self.preprocessor.process_img(state)
     reward += (info["score"] - self.curr_score) / 40.
@@ -89,11 +89,8 @@ class Environment :
     self.input_dims = self.env.observation_space.shape
     self.output_dims = self.env.action_space.n
 
-    self.ppo_net = PPONetwork(self.input_dims, self.output_dims, self.config.network_preset)
     self.agent = Agent(self.input_dims, self.output_dims, self.config)
-    self.agent.save_net()
-    #self.agent.load_net()
-    self.ppo_net.eval()
+    self.agent.load_net()
 
   def create_environment(self):
     return gym_super_mario_bros.make(self.env_name)
@@ -121,34 +118,42 @@ class Environment :
       if step % self.config.learning_interval == 0  :
         self.agent.train(self.logger)
 
-
       #self.env.render()
-
 
     return total_reward
 
-  def run_episode(self):
-    state = self.env.reset()
-    done = False
+  def train(self, n_episodes):
+    n_steps = 0
+    learn_iters = 0
+    best_score = 0
+    score_history = []
 
-    self.agent.memory.clear_memory()
+    for i in range(n_episodes):
+      observation = self.env.reset()
+      done = False
+      score = 0
+      while not done:
+        action, prob, val = self.agent.predict(observation)
+        observation_, reward, done, info = self.env.step(action)
+        n_steps += 1
+        score += reward
+        self.agent.remember(observation, action, prob, val, reward, done)
+        if n_steps % self.config.learning_interval == 0:
+          self.agent.train(self.logger)
+          learn_iters += 1
+        observation = observation_
 
-    total_reward = 0
+        #self.env.render()
 
-    while not done:
-      action = self.agent.predict(state)
-      new_state, reward, done, info = self.env.step(action)
+      score_history.append(score)
+      avg_score = np.mean(score_history[-100:])
 
-      total_reward += reward
+      if avg_score > best_score:
+        best_score = avg_score
+        self.agent.save_net()
 
-      #self.agent.baseline_buffer.append(reward)
-
-      self.agent.remember(state, action, reward, done)
-
-      #self.env.render()
-
-    #self.agent.learn(state, self.logger)
-    return total_reward
+      print('episode', i, 'score %.1f' % score, 'avg score %.1f' % avg_score,
+            'time_steps', n_steps, 'learning_steps', learn_iters)
 
 
 

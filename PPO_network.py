@@ -10,6 +10,7 @@ from torch.distributions import Categorical
 
 linear_dim0 = 256
 linear_dim1 = 256
+import numpy as np
 
 import os
 
@@ -19,29 +20,48 @@ class ActorNetwork(nn.Module) :
 
     self.model_fp = os.path.join('models/actor', network_name)
 
-    # if not os.path.exists(self.model_fp) : os.makedirs(self.model_fp)
+    self.input_dims = input_dims[0]
+    self.output_dims = output_dims
 
-    self.actor = nn.Sequential(
-      nn.Linear(*input_dims, linear_dim0),
-      nn.ReLU(),
-      nn.Linear(linear_dim0, linear_dim1),
-      nn.ReLU(),
-      nn.Linear(linear_dim1, output_dims),
-      nn.Softmax(dim=-1)
-    )
+    self.conv1 = nn.Conv2d(self.input_dims, 32, 3, stride=2, padding=1)
+    self.conv2 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.conv3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.conv4 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.linear = nn.Linear(32 * 6 * 6, 512)
+    self.actor = nn.Linear(512, output_dims)
+    self.softmax = nn.Softmax(dim=-1)
+
+
+
+    # self.actor = nn.Sequential(
+    #   nn.Conv2d(self.input_dims, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 1152, 3, stride=2, padding=1),
+    #   nn.Linear(1152, self.output_dims),
+    #   nn.Softmax(dim=-1)
+    # )
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
     self.device = T.device('cpu')
     self.to(self.device)
 
   def forward(self, state):
-    probs = self.actor(state)
+    x = F.relu(self.conv1(state))
+    x = F.relu(self.conv2(x))
+    x = F.relu(self.conv3(x))
+    x = F.relu(self.conv4(x))
+    x = self.linear(x.view(x.size(0), -1))
+    probs = self.actor(x)
+    probs = self.softmax(probs)
     return Categorical(probs)
 
   def save_network(self):
+    print("saving network...")
     T.save(self.state_dict() , self.model_fp)
 
   def load_network(self):
     if os.path.isfile(self.model_fp):
+      print("loading actor network")
       self.load_state_dict(T.load(self.model_fp))
 
 class CriticNetwork(nn.Module) :
@@ -50,19 +70,35 @@ class CriticNetwork(nn.Module) :
 
     self.model_fp = os.path.join('models/critic', network_name)
 
-    self.actor = nn.Sequential(
-      nn.Linear(*input_dims, linear_dim0),
-      nn.ReLU(),
-      nn.Linear(linear_dim0, linear_dim1),
-      nn.ReLU(),
-      nn.Linear(linear_dim1, 1)
-    )
+    self.input_dims = input_dims[0]
+    self.output_dims = output_dims
+
+    self.conv1 = nn.Conv2d(self.input_dims, 32, 3, stride=2, padding=1)
+    self.conv2 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.conv3 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.conv4 = nn.Conv2d(32, 32, 3, stride=2, padding=1)
+    self.linear = nn.Linear(32 * 6 * 6, 512)
+    self.critic = nn.Linear(512, 1)
+
+
+    # self.actor = nn.Sequential(
+    #   nn.Conv2d(self.input_dims, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 32, 3, stride=2, padding=1),
+    #   nn.Conv2d(32, 1152, 3, stride=2, padding=1),
+    #   nn.Linear(1152, 1)
+    # )
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
     self.device = T.device('cpu')
     self.to(self.device)
 
   def forward(self, state):
-    value = self.actor(state)
+    x = F.relu(self.conv1(state))
+    x = F.relu(self.conv2(x))
+    x = F.relu(self.conv3(x))
+    x = F.relu(self.conv4(x))
+    x = self.linear(x.view(x.size(0), -1))
+    value = self.critic(x)
     return value
 
   def save_network(self):
@@ -70,6 +106,7 @@ class CriticNetwork(nn.Module) :
 
   def load_network(self):
     if os.path.isfile(self.model_fp) :
+      print("loading critic network")
       self.load_state_dict(T.load(self.model_fp))
 
 class PPONetwork(nn.Module):

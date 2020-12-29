@@ -5,11 +5,11 @@ class Config :
     self.network_preset = 1
     self.preprocessing_preset = 1
 
-    self.testing_environment = True # if true, sets up CartPole as testing environment no preprocessing/env wrapping for mario
+    self.testing_environment = False # if true, sets up CartPole as testing environment no preprocessing/env wrapping for mario
     #going on
 
-    batch_size = 5
-    n_epochs = 4
+    batch_size = 16
+    n_epochs = 8
     alpha = 0.0003
 
     self.batch_size = batch_size
@@ -20,5 +20,5 @@ class Config :
 
     self.epochs = n_epochs
 
-    self.learning_interval = 20
+    self.learning_interval = 100
 
