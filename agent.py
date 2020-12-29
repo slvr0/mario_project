@@ -2,8 +2,10 @@ from collections import deque
 import numpy as np
 import torch.functional as F
 from torch.distributions import Categorical
-import torch
+import torch as T
 import os
+
+from PPO_network import ActorNetwork, CriticNetwork
 
 #this class stores rewards and retrieves the instant average of reward
 class BaselineBuffer:
@@ -20,120 +22,169 @@ class BaselineBuffer:
     self.storage.append(v)
     self.N = self.N + 1 if self.N < self.size else self.N
 
-class Agent :
-  def __init__(self,ppo_net, input_dims, output_dims):
-    self.ppo_net = ppo_net
-    self.input_dims = input_dims
-    self.output_dims = output_dims
+#state, action , value, probs(logged probs), (entropy later),
 
-    #hyperparams, move to config and argparser soon
-    self.gamma = 0.9
-    self.tau = 1.0
-    self.beta = 0.01
-    self.epsilon = 0.2
-    self.batch_size = 1000
-    self.save_interval = 10
-    self.learning_rate = 1e-4
-    self.local_steps = 512 # steps we take in learning algorithm chain
-    self.batch_size = 8
-    self.learning_epochs = 8 #change to ten
-    self.global_steps = 5e6
-
-    self.optimizer = torch.optim.Adam(self.ppo_net.parameters(), lr=self.learning_rate)
-
-    self.baseline_buffer = BaselineBuffer(size=1000)
-
-    self.observations = []
+class PPOMemory:
+  def __init__(self, batch_size):
+    self.states = []
+    self.probs = []
+    self.vals = []
     self.actions = []
     self.rewards = []
-    self.terminals = []
-    self.values = []
-    self.old_actions = []
+    self.dones = []
 
-  def predict(self, observation):
-    obs_tensor = torch.from_numpy(observation)
+    self.batch_size = batch_size
 
-    logits, value = self.ppo_net(obs_tensor)
-    self.values.append(value)
+  def generate_batches(self):
+    n_states = len(self.states)
+    batch_start = np.arange(0, n_states, self.batch_size)
+    indices = np.arange(n_states, dtype=np.int64)
+    np.random.shuffle(indices)
+    batches = [indices[i:i + self.batch_size] for i in batch_start]
 
-    policy = torch.nn.functional.softmax(logits, dim=1)
-    old_m = Categorical(policy)
-    action = old_m.sample()
-    self.old_actions.append(action)
+    return np.array(self.states), \
+           np.array(self.actions), \
+           np.array(self.probs), \
+           np.array(self.vals), \
+           np.array(self.rewards), \
+           np.array(self.dones), \
+           batches
 
-    return action
-
-  def store(self, observation, action, reward, done):
-    self.observations.append(torch.from_numpy(observation))
+  def store_memory(self, state, action, probs, vals, reward, done):
+    self.states.append(state)
     self.actions.append(action)
-    self.rewards.append(torch.as_tensor(reward))
-    self.terminals.append(torch.as_tensor(done))
+    self.probs.append(probs)
+    self.vals.append(vals)
+    self.rewards.append(reward)
+    self.dones.append(done)
 
   def clear_memory(self):
-    self.observations = []
+    self.states = []
+    self.probs = []
     self.actions = []
     self.rewards = []
-    self.terminals = []
-    self.old_actions = []
-    self.values = []
+    self.dones = []
+    self.vals = []
 
-  def save_model(self, path):
-    torch.save(self.ppo_net.state_dict(), path)
-    print("saving model...")
+class Agent :
+  def __init__(self,input_dims, output_dims, config):
 
-  def load_model(self, path):
-    if os.path.isfile(path):
-      print("loading model...")
-      self.ppo_net.load_state_dict(torch.load(path))
+    self.input_dims = input_dims
+    self.output_dims = output_dims
+    self.config = config
 
-  def learn(self, last_state, logger):
-    _, next_value, = self.ppo_net(torch.from_numpy(last_state))
-    next_value = next_value.squeeze()
+    self.gamma            = self.config.gamma
+    self.gamma_gae        = self.config.gamma_gae
+    self.learning_rate    = self.config.learning_rate
+    self.batch_size       = self.config.batch_size
+    self.policy_grad_clip = self.config.policy_grad_clip
 
-    old_log_policies = torch.cat(self.old_actions).detach()
-    actions = torch.cat(self.actions)
-    values = torch.cat(self.values).detach()
-    states = torch.cat(self.observations)
-    self.local_steps = len(states)
-    gae = 0
-    R = []
-    for value, reward, done in list(zip(self.values, self.rewards, self.terminals))[::-1]:
-      gae = gae * self.gamma * self.tau
-      gae = gae + reward + self.gamma * next_value.detach() * (1 - done.item()) - value.detach()
-      next_value = value
-      R.append(gae + value)
-    R = R[::-1]
-    R = torch.cat(R).detach()
-    advantages = R - values
-    for i in range(self.learning_epochs):
-      indice = torch.randperm(self.local_steps)
-      for j in range(self.batch_size):
+    self.memory = PPOMemory(self.config.batch_size)
 
-        batch_idx_start = int(j * (self.local_steps / self.batch_size))
-        batch_idx_end = int((j + 1) * (
-                            self.local_steps / self.batch_size))
-        batch_indices = indice[batch_idx_start : batch_idx_end]
+    self.actor = ActorNetwork(self.input_dims, self.output_dims, self.learning_rate)
+    self.critic = CriticNetwork(self.input_dims, self.output_dims, self.learning_rate)
 
-        logits, value = self.ppo_net(states[batch_indices])
-        new_policy = torch.nn.functional.softmax(logits, dim=1)
-        new_m = Categorical(new_policy)
-        new_log_policy = new_m.log_prob(actions[batch_indices])
-        ratio = torch.exp(new_log_policy - old_log_policies[batch_indices])
-        actor_loss = -torch.mean(torch.min(ratio * advantages[batch_indices],
-                                           torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon) *
-                                           advantages[
-                                             batch_indices]))
+  def save_net(self):
+    self.actor.save_network()
+    self.critic.save_network()
 
-        critic_loss = torch.nn.functional.smooth_l1_loss(torch.as_tensor(R[batch_indices]).squeeze(), value.squeeze())
+  def load_net(self):
+    self.actor.load_network()
+    self.critic.load_network()
 
-        logger.writer.add_scalar("critic_loss", critic_loss, i)
+  def predict(self, state):
 
-        entropy_loss = torch.mean(new_m.entropy())
-        total_loss = actor_loss + critic_loss - self.beta * entropy_loss
-        self.optimizer.zero_grad()
+    state = T.tensor([state], dtype=T.float32).to(self.actor.device)
+
+    probs = self.actor(state)
+    value = self.critic(state)
+
+    action = probs.sample()
+
+    prob = T.squeeze(probs.log_prob(action)).item()
+    action = T.squeeze(action).item()
+    value = T.squeeze(value).item()
+
+    return action, prob, value
+
+  def remember(self, state, action, probs, vals, reward, done):
+    self.memory.store_memory(state, action, probs, vals, reward, done)
+
+  def train(self, logger):
+    for epoch in range(self.config.epochs):
+
+      states, actions, probs, values, rewards, terminals, batches = self.memory.generate_batches()
+
+      advantage = np.zeros(len(rewards), dtype=np.float32)
+      for t in range(len(rewards) - 1):
+        adv_decay = 1.0
+        adv_t = 0
+        for k in range(t, len(rewards) - 1):
+          adv_t += adv_decay * (rewards[k] + self.gamma * values[k + 1]
+                                * (1 - int(terminals[k])) - values[k])
+          adv_decay *= self.gamma * self.gamma_gae
+        advantage[t] = adv_t
+
+      advantage = T.tensor([advantage]).to(self.actor.device)
+
+      for batch in batches :
+
+        #now fetch batch data
+        state_t = T.tensor(states[batch], dtype=T.float32 ).to(self.actor.device)
+        prev_probs_t = T.tensor(probs[batch]).to(self.actor.device)
+        actions_t = T.tensor(actions[batch]).to(self.actor.device)
+
+        #calculate new poliy values, this is being looped so at this state policy will change,
+
+        new_probs_t   = self.actor(state_t)
+        new_probs_t = new_probs_t.log_prob(actions_t)
+
+        new_critics_v_t = self.critic(state_t)
+
+        probability_ratio = new_probs_t.exp() / prev_probs_t.exp()
+
+        weight_prob_ratio = advantage[0][batch] * probability_ratio
+
+        weight_prob_ratio_clipped = T.clamp(weight_prob_ratio, 1 - self.policy_grad_clip, 1 + self.policy_grad_clip) *\
+          advantage[0][batch]
+
+        a_loss = -T.min(weight_prob_ratio, weight_prob_ratio_clipped).mean()
+
+        state_prop = advantage[0][batch] + values[batch]
+        c_loss = ((state_prop - new_critics_v_t) ** 2).mean()
+
+        total_loss = a_loss + .5 * c_loss
+        self.actor.optimizer.zero_grad()
+        self.critic.optimizer.zero_grad()
+
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.ppo_net.parameters(), 0.5)
-        self.optimizer.step()
+
+        self.actor.optimizer.step()
+        self.critic.optimizer.step()
+
+    self.memory.clear_memory()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

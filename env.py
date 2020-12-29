@@ -4,6 +4,7 @@ import numpy as np
 from agent import Agent
 from PPO_network import PPONetwork
 
+import gym
 from gym import Wrapper
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT, COMPLEX_MOVEMENT, RIGHT_ONLY
@@ -73,29 +74,64 @@ class Environment :
     self.env_name = env_name
     self.config = config
     self.preprocessor = EnvPreprocessor(self.config.preprocessing_preset)
-    self.env = self.create_environment()
+
     self.agent_name = agent_name
 
-    #convert to joypadspace , then apply custom wrappers
-    self.env = JoypadSpace(self.env, actions=SIMPLE_MOVEMENT)
-    self.env = CustomRewardWrapper(self.env, self.preprocessor)
-    self.env = CustomSkipFrame(self.env, 4) #this is a frame buffer
+    if self.config.testing_environment :
+      self.env = gym.make('CartPole-v0')
+    else :
+      self.env = self.create_environment()
+      #convert to joypadspace , then apply custom wrappers
+      self.env = JoypadSpace(self.env, actions=SIMPLE_MOVEMENT)
+      self.env = CustomRewardWrapper(self.env, self.preprocessor)
+      self.env = CustomSkipFrame(self.env, 4) #this is a frame buffer
 
     self.input_dims = self.env.observation_space.shape
     self.output_dims = self.env.action_space.n
 
     self.ppo_net = PPONetwork(self.input_dims, self.output_dims, self.config.network_preset)
-    self.agent = Agent(self.ppo_net, self.input_dims, self.output_dims)
-    self.agent.load_model('models/' + self.agent_name)
+    self.agent = Agent(self.input_dims, self.output_dims, self.config)
+    self.agent.save_net()
+    #self.agent.load_net()
     self.ppo_net.eval()
 
   def create_environment(self):
     return gym_super_mario_bros.make(self.env_name)
 
+  def run_cartpole_episode(self):
+
+    env = gym.make('CartPole-v0')
+    state = env.reset()
+    done = False
+
+    self.agent.memory.clear_memory()
+    step = 0
+    total_reward = 0
+
+    while not done:
+
+      action, prob, value = self.agent.predict(state)
+      new_state, reward, done, info = env.step(action)
+
+      total_reward += reward
+
+      self.agent.remember(state, action, reward, value, prob, done)
+
+      step += 1
+      if step % self.config.learning_interval == 0  :
+        self.agent.train(self.logger)
+
+
+      #self.env.render()
+
+
+    return total_reward
+
   def run_episode(self):
     state = self.env.reset()
     done = False
-    self.agent.clear_memory()
+
+    self.agent.memory.clear_memory()
 
     total_reward = 0
 
@@ -107,13 +143,12 @@ class Environment :
 
       #self.agent.baseline_buffer.append(reward)
 
-      self.agent.store(state, action, reward, done)
+      self.agent.remember(state, action, reward, done)
 
       #self.env.render()
 
-    self.agent.learn(state, self.logger)
+    #self.agent.learn(state, self.logger)
     return total_reward
-
 
 
 
