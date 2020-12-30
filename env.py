@@ -127,6 +127,7 @@ class Environment :
     learn_iters = 0
     best_score = 0
     score_history = []
+    warmup_session = 30
 
     for i in range(n_episodes):
       observation = self.env.reset()
@@ -148,9 +149,11 @@ class Environment :
       score_history.append(score)
       avg_score = np.mean(score_history[-100:])
 
-      if avg_score > best_score:
+      if avg_score > best_score :
         best_score = avg_score
-        self.agent.save_net()
+
+        if i > warmup_session : self.agent.save_net()
+
 
       print('episode', i, 'score %.1f' % score, 'avg score %.1f' % avg_score,
             'time_steps', n_steps, 'learning_steps', learn_iters)

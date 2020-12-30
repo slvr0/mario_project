@@ -78,7 +78,7 @@ class Agent :
     self.learning_rate    = self.config.learning_rate
     self.batch_size       = self.config.batch_size
     self.policy_grad_clip = self.config.policy_grad_clip
-
+    self.entropy_scaling = self.config.entropy_scaling
     self.memory = PPOMemory(self.config.batch_size)
 
     self.actor = ActorNetwork(self.input_dims, self.output_dims, self.learning_rate)
@@ -141,7 +141,10 @@ class Agent :
 
         new_probs_t   = self.actor(state_t[:,0,:,:,:])
 
+        entropy_loss = T.mean(new_probs_t.entropy())
+
         new_probs_t = new_probs_t.log_prob(actions_t)
+
 
         new_critics_v_t = self.critic(state_t[:,0,:,:,:])
 
@@ -157,7 +160,10 @@ class Agent :
         state_prop = advantage[0][batch] + values[batch]
         c_loss = ((state_prop - new_critics_v_t) ** 2).mean()
 
-        total_loss = a_loss + .5 * c_loss
+        total_loss = a_loss + .5 * c_loss - (entropy_loss * self.entropy_scaling)
+
+        #print(total_loss, (entropy_loss * self.entropy_scaling))
+
         self.actor.optimizer.zero_grad()
         self.critic.optimizer.zero_grad()
 

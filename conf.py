@@ -18,6 +18,8 @@ class Config :
     self.gamma_gae = 0.95
     self.policy_grad_clip = 0.1
 
+    self.entropy_scaling = 0.1
+
     self.epochs = n_epochs
 
     self.learning_interval = 100

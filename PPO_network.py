@@ -53,6 +53,7 @@ class ActorNetwork(nn.Module) :
     x = self.linear(x.view(x.size(0), -1))
     probs = self.actor(x)
     probs = self.softmax(probs)
+
     return Categorical(probs)
 
   def save_network(self):
